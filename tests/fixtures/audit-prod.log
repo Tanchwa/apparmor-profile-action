@@ -1,0 +1,10 @@
+# A second harvest of the same workload, from somewhere the CI run is not:
+# a cluster. Error paths, lazily imported modules, and the files that only
+# exist because something else mounted them next to the container.
+[  900.100000] audit: type=1400 audit(1700009999.100:81): apparmor="ALLOWED" operation="open" profile="aa-learn-myapp" name="/etc/ssl/certs/ca-certificates.crt" pid=9001 comm="myapp" requested_mask="r" denied_mask="r" fsuid=0 ouid=0
+[  900.100010] audit: type=1400 audit(1700009999.101:82): apparmor="ALLOWED" operation="open" profile="aa-learn-myapp" name="/etc/resolv.conf" pid=9001 comm="myapp" requested_mask="r" denied_mask="r" fsuid=0 ouid=0
+[  900.100020] audit: type=1400 audit(1700009999.102:83): apparmor="ALLOWED" operation="open" profile="aa-learn-myapp" name="/var/run/secrets/kubernetes.io/serviceaccount/token" pid=9001 comm="myapp" requested_mask="r" denied_mask="r" fsuid=0 ouid=0
+[  900.100030] audit: type=1400 audit(1700009999.103:84): apparmor="ALLOWED" operation="open" profile="aa-learn-myapp" name="/usr/lib/python3.12/email/parser.py" pid=9001 comm="myapp" requested_mask="r" denied_mask="r" fsuid=0 ouid=0
+[  900.100040] audit: type=1400 audit(1700009999.104:85): apparmor="ALLOWED" operation="open" profile="aa-learn-myapp" name="/var/log/myapp/app.log" pid=9001 comm="myapp" requested_mask="a" denied_mask="a" fsuid=0 ouid=0
+[  900.100050] audit: type=1400 audit(1700009999.105:86): apparmor="ALLOWED" operation="capable" profile="aa-learn-myapp" pid=9001 comm="myapp" capability=19 capname="sys_ptrace"
+[  900.100060] audit: type=1400 audit(1700009999.106:87): apparmor="ALLOWED" operation="create" profile="aa-learn-myapp" pid=9001 comm="myapp" family="inet6" sock_type="stream" protocol=6
