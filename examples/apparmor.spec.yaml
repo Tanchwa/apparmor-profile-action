@@ -1,0 +1,84 @@
+# Declarative AppArmor spec.
+#
+# Used by the `spec` generator, which renders this into a profile without
+# running the workload. Reach for it when the application cannot be exercised
+# meaningfully in CI; otherwise prefer runtime learning, which observes what
+# the process really does.
+#
+# Render locally:
+#   python3 scripts/aa_from_spec.py examples/apparmor.spec.yaml
+
+name: myapp
+
+# Host profiles attach to a binary. Container profiles leave this out and are
+# selected with `docker run --security-opt apparmor=myapp`.
+attach: /usr/bin/myapp
+
+# enforce blocks violations; complain only logs them. Ship a new profile in
+# complain mode first if you are not yet sure the rules are complete.
+mode: enforce
+
+# Pin the policy language version so a newer apparmor_parser does not silently
+# reinterpret the profile. Omit to follow whatever the host defaults to.
+abi: "3.0"
+
+flags:
+  - attach_disconnected
+  - mediate_deleted
+
+abstractions:
+  - base
+  - nameservice
+  - openssl
+
+capabilities:
+  - net_bind_service
+  - setgid
+  - setuid
+
+network:
+  - inet stream
+  - inet6 stream
+  - { family: inet, type: dgram }
+
+files:
+  read:
+    - /etc/myapp/**
+    - /usr/share/myapp/**
+    - /usr/lib/myapp/**
+  write:
+    - /var/lib/myapp/**
+    - /var/run/myapp/*.pid
+  append:
+    - /var/log/myapp/*.log
+  mmap:
+    - /usr/lib/myapp/*.so*
+  exec:
+    - path: /usr/bin/myapp-worker
+      mode: ix          # inherit this profile
+    - path: /usr/bin/convert
+      mode: Px          # transition to convert's own profile
+  # Anything the shorthands above cannot express:
+  raw:
+    /dev/urandom: r
+
+signal:
+  - (send) set=(term,int) peer=myapp
+
+unix:
+  - (bind, listen, accept) type=stream addr="@myapp-*"
+
+# Denials are absolute: no later allow rule can override them.
+deny:
+  read:
+    - /etc/shadow
+    - /etc/ssh/**
+    - /home/**
+  write:
+    - /etc/**
+    - /usr/**
+
+# Rules appended verbatim, for anything the schema does not model.
+raw: |
+  owner /var/lib/myapp/** rwk,
+  /proc/sys/kernel/random/uuid r,

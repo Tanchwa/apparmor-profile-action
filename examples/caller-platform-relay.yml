@@ -1,0 +1,70 @@
+# A real worked example: platform-service's relay.
+#
+# Drop this in platform-service as .github/workflows/apparmor-relay.yml.
+# Relay is a single Python process serving /health and /metrics on 8000, which
+# makes it close to the ideal learning target: one process, HTTP-exercisable,
+# no database to stand up first.
+
+name: AppArmor profile (relay)
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '17 4 * * 1'
+  push:
+    branches: [main]
+    paths:
+      - 'relay/**'
+      - 'deployment/docker/relay/**'
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  apparmor:
+    uses: linkervision/apparmor-profile-action/.github/workflows/apparmor-profile.yml@v1
+    with:
+      name: platform-relay
+      target: docker
+      profile_path: deployment/apparmor.d/platform-relay
+
+      docker_image: platform-relay:aa-learn
+      docker_build: true
+      # The prod Dockerfile COPYs pyproject.toml/uv.lock and platform_relay
+      # from the context root, so the context is relay/, not the repo root.
+      docker_build_context: relay
+      docker_dockerfile: deployment/docker/relay/Dockerfile
+
+      docker_ports: |
+        8000:8000
+
+      # Settings has no defaults for these four, so the process exits 1 without
+      # them. Dummy values are correct here: /health and /metrics never reach
+      # the platform, and learning only needs the process to run its real code
+      # paths. Do NOT interpolate real secrets -- workflow inputs are not
+      # registered for log masking the way secrets.* are.
+      docker_env: |
+        PLATFORM_URL=http://platform.invalid
+        RELAY_CLIENT_ID=aa-learn
+        RELAY_CLIENT_SECRET=aa-learn-not-a-real-secret
+        ALLOWED_CLIENT_IDS=aa-learn-agent
+        LOG_LEVEL=DEBUG
+
+      detach: true
+      ready_url: http://localhost:8000/health
+      ready_timeout: 60
+      probe_urls: |
+        http://localhost:8000/health
+        http://localhost:8000/metrics
+
+      # uv/python write bytecode caches under paths that differ every build.
+      exclude: |
+        ^/tmp/
+      rewrite: |
+        ^/usr/local/lib/python3\.[0-9]+/=/usr/local/lib/python3.*/
+
+      labels: apparmor,security
+      team_reviewers: platform-security
+    secrets:
+      token: ${{ secrets.APPARMOR_BOT_TOKEN }}

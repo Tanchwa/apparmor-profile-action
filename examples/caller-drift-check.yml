@@ -1,0 +1,40 @@
+# Drop this in an application repo as .github/workflows/apparmor-check.yml
+#
+# A pull-request gate. Regenerates the profile from the PR's own contents and
+# fails if it differs from what the branch committed, without pushing
+# anything. Pair it with the PR-opening workflow: this one tells contributors
+# their change moved the profile, that one produces the updated profile.
+#
+# contents:read is enough -- the propose job is skipped under dry_run, so no
+# write permission is ever requested.
+#
+# Keep this on `pull_request`. It builds and runs the PR's code, which on a
+# fork PR is untrusted; `pull_request` is what withholds secrets and keeps the
+# token read-only. Switching to `pull_request_target` to "fix" a missing
+# secret would hand that untrusted code a writable token.
+
+name: AppArmor profile check
+
+on:
+  pull_request:
+    paths:
+      - 'Dockerfile'
+      - 'src/**'
+      - 'apparmor.d/**'
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    uses: linkervision/apparmor-profile-action/.github/workflows/apparmor-profile.yml@v1
+    with:
+      name: myapp
+      target: docker
+      profile_path: apparmor.d/myapp
+      docker_image: myapp:ci
+      docker_build: true
+      docker_args: |
+        --selftest
+      dry_run: true
+      fail_on_drift: true

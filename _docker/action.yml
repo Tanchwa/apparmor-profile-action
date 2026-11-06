@@ -1,0 +1,398 @@
+name: Generate AppArmor Profile (Docker)
+description: >-
+  Generate an AppArmor profile for a container image. The docker build, run,
+  probe and stop commands are baked into this action; callers supply only
+  structured values, never shell.
+author: linkervision
+
+inputs:
+  # --- identity ---------------------------------------------------------
+  name:
+    description: Profile name, e.g. "myapp".
+    required: true
+  output:
+    description: Where to write the generated profile.
+    required: true
+  generator:
+    description: auto | runtime | spec.
+    default: auto
+
+  # --- image: docker build is baked in ----------------------------------
+  image:
+    description: Image to confine. Built from build_context when build is true, otherwise pulled.
+    default: ''
+  build:
+    description: Build the image before learning.
+    default: 'false'
+  build_context:
+    description: Docker build context directory.
+    default: '.'
+  dockerfile:
+    description: Dockerfile path, relative to the repository root.
+    default: Dockerfile
+  build_args:
+    description: Newline-separated KEY=VALUE build arguments.
+    default: ''
+  build_target:
+    description: Dockerfile stage to build.
+    default: ''
+
+  # --- docker run: flags are structured, never a command string ---------
+  entrypoint:
+    description: Override the image entrypoint. A single executable, not a shell line.
+    default: ''
+  args:
+    description: Newline-separated arguments passed to the container, one per line.
+    default: ''
+  env:
+    description: Newline-separated KEY=VALUE environment variables.
+    default: ''
+  ports:
+    description: Newline-separated HOST:CONTAINER port mappings.
+    default: ''
+  volumes:
+    description: Newline-separated SOURCE:TARGET[:ro] mounts.
+    default: ''
+  container_user:
+    description: Value for docker run --user.
+    default: ''
+  workdir:
+    description: Value for docker run --workdir.
+    default: ''
+  network:
+    description: Value for docker run --network.
+    default: ''
+
+  # --- how the workload is exercised ------------------------------------
+  detach:
+    description: >-
+      Run the container in the background and exercise it over HTTP. When
+      false the container runs to completion and probes are skipped.
+    default: 'false'
+  ready_url:
+    description: Poll this http(s) URL until it answers before probing.
+    default: ''
+  ready_timeout:
+    description: Seconds to wait for ready_url.
+    default: '60'
+  probe_urls:
+    description: Newline-separated http(s) URLs to request while the container runs.
+    default: ''
+  probe_timeout:
+    description: Per-request timeout in seconds.
+    default: '10'
+  run_timeout:
+    description: Seconds to allow a non-detached container to run.
+    default: '300'
+  stop_timeout:
+    description: Seconds to allow a detached container to stop.
+    default: '10'
+  allow_workload_failure:
+    description: Generate a profile even if the container or probes fail.
+    default: 'false'
+
+  # --- profile shaping ---------------------------------------------------
+  spec_file:
+    description: Declarative spec used by the spec generator.
+    default: apparmor.spec.yaml
+  mode:
+    description: enforce | complain.
+    default: enforce
+  abi:
+    description: AppArmor ABI to pin, e.g. "3.0".
+    default: ''
+  flags:
+    description: Comma-separated profile flags.
+    default: attach_disconnected,mediate_deleted
+  abstractions:
+    description: Comma-separated abstractions to include.
+    default: base
+  exec_mode:
+    description: Transition mode for learned executables (ix, Px, Ux, Cx).
+    default: ix
+  glob_threshold:
+    description: Collapse N+ siblings sharing a permission set into <dir>/*. 0 disables.
+    default: '0'
+  generalize:
+    description: Replace per-run path components (pids, tids) with globs.
+    default: 'true'
+  exclude:
+    description: Newline-separated regexes of learned paths to drop.
+    default: ''
+  rewrite:
+    description: Newline-separated REGEX=REPLACEMENT path rewrites.
+    default: ''
+  extra_rules:
+    description: Newline-separated rules appended verbatim.
+    default: ''
+  settle_seconds:
+    description: Seconds to wait after the workload before harvesting.
+    default: '3'
+  validate:
+    description: Parse the generated profile with apparmor_parser.
+    default: 'true'
+  load_check:
+    description: Also load the profile into the kernel as a validation step.
+    default: 'false'
+
+outputs:
+  profile_path:
+    description: Path of the generated profile.
+    value: ${{ inputs.output }}
+  generator_used:
+    description: Which generator ran (runtime or spec).
+    value: ${{ steps.resolve.outputs.generator }}
+
+runs:
+  using: composite
+  steps:
+    - name: Resolve generator
+      id: resolve
+      shell: bash
+      env:
+        GENERATOR: ${{ inputs.generator }}
+        IMAGE: ${{ inputs.image }}
+        SPEC_FILE: ${{ inputs.spec_file }}
+      run: |
+        set -euo pipefail
+        gen="$GENERATOR"
+        if [ "$gen" = "auto" ]; then
+          if [ -n "$IMAGE" ] && [ -d /sys/kernel/security/apparmor ]; then
+            gen=runtime
+          else
+            gen=spec
+          fi
+        fi
+        if [ "$gen" = "runtime" ] && [ -z "$IMAGE" ]; then
+          echo "::error::generator=runtime needs an 'image' to run."
+          exit 1
+        fi
+        if [ "$gen" = "spec" ] && [ ! -f "$SPEC_FILE" ]; then
+          echo "::error::generator resolved to 'spec' but $SPEC_FILE does not exist."
+          exit 1
+        fi
+        echo "generator=$gen" >> "$GITHUB_OUTPUT"
+        echo "Using the $gen generator."
+
+    - name: Install dependencies
+      shell: bash
+      env:
+        GENERATOR: ${{ steps.resolve.outputs.generator }}
+      run: |
+        set -euo pipefail
+        if [ "$GENERATOR" = "spec" ]; then
+          python3 -c "import yaml" 2>/dev/null \
+            || python3 -m pip install --quiet --disable-pip-version-check pyyaml
+        elif ! command -v apparmor_parser >/dev/null 2>&1; then
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq apparmor-utils
+        fi
+
+    - name: Build the image
+      if: steps.resolve.outputs.generator == 'runtime' && inputs.build == 'true'
+      shell: bash
+      env:
+        IMAGE: ${{ inputs.image }}
+        BUILD_CONTEXT: ${{ inputs.build_context }}
+        DOCKERFILE: ${{ inputs.dockerfile }}
+        BUILD_ARGS: ${{ inputs.build_args }}
+        BUILD_TARGET: ${{ inputs.build_target }}
+      run: |
+        set -euo pipefail
+        # docker build is baked in; inputs only become argv elements.
+        args=(build --tag "$IMAGE" --file "$DOCKERFILE")
+        [ -n "$BUILD_TARGET" ] && args+=(--target "$BUILD_TARGET")
+        while IFS= read -r pair; do
+          [ -n "$pair" ] && args+=(--build-arg "$pair")
+        done <<< "$BUILD_ARGS"
+        args+=("$BUILD_CONTEXT")
+        echo "+ docker ${args[*]}"
+        docker "${args[@]}"
+
+    - name: Load the learning profile
+      id: learn
+      if: steps.resolve.outputs.generator == 'runtime'
+      shell: bash
+      env:
+        NAME: ${{ inputs.name }}
+        ACTION_PATH: ${{ github.action_path }}
+      run: |
+        set -euo pipefail
+        bash "$ACTION_PATH/../scripts/aa_learn_start.sh" \
+          --name "$NAME" --state "$RUNNER_TEMP/aa-learn" --template container
+
+    - name: Run the container under the learning profile
+      id: workload
+      if: steps.resolve.outputs.generator == 'runtime'
+      shell: bash
+      env:
+        IMAGE: ${{ inputs.image }}
+        ENTRYPOINT: ${{ inputs.entrypoint }}
+        CONTAINER_ARGS: ${{ inputs.args }}
+        CONTAINER_ENV: ${{ inputs.env }}
+        PORTS: ${{ inputs.ports }}
+        VOLUMES: ${{ inputs.volumes }}
+        CONTAINER_USER: ${{ inputs.container_user }}
+        WORKDIR: ${{ inputs.workdir }}
+        NETWORK: ${{ inputs.network }}
+        DETACH: ${{ inputs.detach }}
+        READY_URL: ${{ inputs.ready_url }}
+        READY_TIMEOUT: ${{ inputs.ready_timeout }}
+        PROBE_URLS: ${{ inputs.probe_urls }}
+        PROBE_TIMEOUT: ${{ inputs.probe_timeout }}
+        RUN_TIMEOUT: ${{ inputs.run_timeout }}
+        STOP_TIMEOUT: ${{ inputs.stop_timeout }}
+        ALLOW_FAILURE: ${{ inputs.allow_workload_failure }}
+        LEARN_PROFILE: ${{ steps.learn.outputs.learn_profile }}
+        ACTION_PATH: ${{ github.action_path }}
+      run: |
+        set -euo pipefail
+        container="aa-learn-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+
+        # The whole docker run invocation is this action's, not the caller's.
+        # Confinement is not optional: the profile is always applied.
+        args=(run --rm --name "$container"
+              --security-opt "apparmor=$LEARN_PROFILE")
+        [ -n "$ENTRYPOINT" ] && args+=(--entrypoint "$ENTRYPOINT")
+        [ -n "$CONTAINER_USER" ] && args+=(--user "$CONTAINER_USER")
+        [ -n "$WORKDIR" ] && args+=(--workdir "$WORKDIR")
+        [ -n "$NETWORK" ] && args+=(--network "$NETWORK")
+        while IFS= read -r v; do [ -n "$v" ] && args+=(--env "$v"); done <<< "$CONTAINER_ENV"
+        while IFS= read -r v; do [ -n "$v" ] && args+=(--publish "$v"); done <<< "$PORTS"
+        while IFS= read -r v; do [ -n "$v" ] && args+=(--volume "$v"); done <<< "$VOLUMES"
+        [ "$DETACH" = "true" ] && args+=(--detach)
+        args+=("$IMAGE")
+        while IFS= read -r v; do [ -n "$v" ] && args+=("$v"); done <<< "$CONTAINER_ARGS"
+
+        # Never echo --env values. A caller can interpolate a secret into
+        # docker_env, and reusable-workflow *inputs* are not registered for log
+        # masking the way secrets.* are, so printing argv verbatim would leak it.
+        display=(); redact=false
+        for a in "${args[@]}"; do
+          if [ "$redact" = "true" ]; then
+            display+=("${a%%=*}=***"); redact=false
+          else
+            display+=("$a")
+            [ "$a" = "--env" ] && redact=true
+          fi
+        done
+
+        status=0
+        echo "::group::docker ${display[*]}"
+        if [ "$DETACH" = "true" ]; then
+          docker "${args[@]}"
+          echo "::endgroup::"
+
+          probe=()
+          [ -n "$READY_URL" ] && probe+=(--ready "$READY_URL" --ready-timeout "$READY_TIMEOUT")
+          probe+=(--timeout "$PROBE_TIMEOUT")
+          while IFS= read -r u; do [ -n "$u" ] && probe+=("$u"); done <<< "$PROBE_URLS"
+          bash "$ACTION_PATH/../scripts/probe.sh" "${probe[@]}" || status=$?
+
+          echo "::group::Container logs"
+          docker logs "$container" 2>&1 | tail -n 100 || true
+          echo "::endgroup::"
+          docker stop --time "$STOP_TIMEOUT" "$container" >/dev/null 2>&1 || true
+        else
+          timeout "$RUN_TIMEOUT" docker "${args[@]}" || status=$?
+          echo "::endgroup::"
+        fi
+
+        echo "workload exited with status $status"
+        if [ "$status" -ne 0 ] && [ "$ALLOW_FAILURE" != "true" ]; then
+          echo "::error::The workload failed (status $status). A profile learned from a"
+          echo "partial run would be incomplete. Set allow_workload_failure to override."
+          exit "$status"
+        fi
+
+    - name: Harvest audit records
+      if: steps.resolve.outputs.generator == 'runtime'
+      shell: bash
+      env:
+        SETTLE: ${{ inputs.settle_seconds }}
+        ACTION_PATH: ${{ github.action_path }}
+      run: |
+        set -euo pipefail
+        bash "$ACTION_PATH/../scripts/aa_learn_harvest.sh" \
+          --state "$RUNNER_TEMP/aa-learn" \
+          --out "$RUNNER_TEMP/apparmor-audit.log" \
+          --settle "$SETTLE"
+
+    - name: Synthesize the profile
+      if: steps.resolve.outputs.generator == 'runtime'
+      shell: bash
+      env:
+        NAME: ${{ inputs.name }}
+        OUTPUT: ${{ inputs.output }}
+        MODE: ${{ inputs.mode }}
+        ABI: ${{ inputs.abi }}
+        FLAGS: ${{ inputs.flags }}
+        ABSTRACTIONS: ${{ inputs.abstractions }}
+        EXEC_MODE: ${{ inputs.exec_mode }}
+        GLOB_THRESHOLD: ${{ inputs.glob_threshold }}
+        GENERALIZE: ${{ inputs.generalize }}
+        EXCLUDE: ${{ inputs.exclude }}
+        REWRITE: ${{ inputs.rewrite }}
+        EXTRA_RULES: ${{ inputs.extra_rules }}
+        LEARN_PROFILE: ${{ steps.learn.outputs.learn_profile }}
+        ACTION_PATH: ${{ github.action_path }}
+      run: |
+        set -euo pipefail
+        mkdir -p "$(dirname "$OUTPUT")"
+        args=(--profile "$LEARN_PROFILE" --name "$NAME" --template container
+              --mode "$MODE" --flags "$FLAGS" --abstractions "$ABSTRACTIONS"
+              --exec-mode "$EXEC_MODE" --glob-threshold "$GLOB_THRESHOLD"
+              --output "$OUTPUT")
+        [ -n "$ABI" ] && args+=(--abi "$ABI")
+        [ "$GENERALIZE" = "true" ] || args+=(--no-generalize)
+        while IFS= read -r l; do [ -n "$l" ] && args+=(--exclude "$l"); done <<< "$EXCLUDE"
+        while IFS= read -r l; do [ -n "$l" ] && args+=(--rewrite "$l"); done <<< "$REWRITE"
+        while IFS= read -r l; do [ -n "$l" ] && args+=(--extra-rule "$l"); done <<< "$EXTRA_RULES"
+        python3 "$ACTION_PATH/../scripts/aa_from_logs.py" \
+          "$RUNNER_TEMP/apparmor-audit.log" "${args[@]}"
+
+    - name: Render the profile from the spec
+      if: steps.resolve.outputs.generator == 'spec'
+      shell: bash
+      env:
+        NAME: ${{ inputs.name }}
+        MODE: ${{ inputs.mode }}
+        SPEC_FILE: ${{ inputs.spec_file }}
+        OUTPUT: ${{ inputs.output }}
+        ACTION_PATH: ${{ github.action_path }}
+      run: |
+        set -euo pipefail
+        mkdir -p "$(dirname "$OUTPUT")"
+        python3 "$ACTION_PATH/../scripts/aa_from_spec.py" \
+          "$SPEC_FILE" --name "$NAME" --mode "$MODE" --output "$OUTPUT"
+
+    - name: Validate the profile
+      if: inputs.validate == 'true'
+      shell: bash
+      env:
+        OUTPUT: ${{ inputs.output }}
+        LOAD_CHECK: ${{ inputs.load_check }}
+        ACTION_PATH: ${{ github.action_path }}
+      run: bash "$ACTION_PATH/../scripts/validate.sh" "$OUTPUT" "$LOAD_CHECK"
+
+    - name: Summarize
+      shell: bash
+      env:
+        OUTPUT: ${{ inputs.output }}
+        GENERATOR: ${{ steps.resolve.outputs.generator }}
+      run: |
+        set -euo pipefail
+        {
+          echo "### AppArmor profile generated (docker)"
+          echo
+          echo "- generator: \`$GENERATOR\`"
+          echo "- path: \`$OUTPUT\`"
+          echo
+          echo '```'
+          cat "$OUTPUT"
+          echo '```'
+        } >> "$GITHUB_STEP_SUMMARY"
+
+branding:
+  icon: shield
+  color: blue

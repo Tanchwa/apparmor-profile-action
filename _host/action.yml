@@ -1,0 +1,381 @@
+name: Generate AppArmor Profile (Host Binary)
+description: >-
+  Generate an AppArmor profile for a binary installed on the runner. The
+  install, launch, probe and stop commands are baked into this action;
+  callers supply only structured values, never shell.
+author: linkervision
+
+inputs:
+  # --- identity ---------------------------------------------------------
+  name:
+    description: Profile name, e.g. "usr.bin.myapp".
+    required: true
+  output:
+    description: Where to write the generated profile.
+    required: true
+  generator:
+    description: auto | runtime | spec.
+    default: auto
+
+  # --- the binary --------------------------------------------------------
+  binary:
+    description: Absolute path to the executable. This is also the profile's attachment path.
+    required: true
+  args:
+    description: Newline-separated arguments passed to the binary, one per line.
+    default: ''
+  env:
+    description: Newline-separated KEY=VALUE environment variables.
+    default: ''
+  workdir:
+    description: Directory to run the binary from.
+    default: ''
+  run_as:
+    description: Run the binary as this user via sudo -u. Empty runs as the runner user.
+    default: ''
+
+  # --- installation: apt and dpkg are baked in ---------------------------
+  apt_packages:
+    description: Newline-separated apt packages to install before learning.
+    default: ''
+  deb_package:
+    description: Path to a .deb built by the repository, installed with dpkg before learning.
+    default: ''
+
+  # --- how the workload is exercised -------------------------------------
+  detach:
+    description: >-
+      Start the binary in the background and exercise it over HTTP. When false
+      it runs to completion and probes are skipped.
+    default: 'false'
+  ready_url:
+    description: Poll this http(s) URL until it answers before probing.
+    default: ''
+  ready_timeout:
+    description: Seconds to wait for ready_url.
+    default: '60'
+  probe_urls:
+    description: Newline-separated http(s) URLs to request while the binary runs.
+    default: ''
+  probe_timeout:
+    description: Per-request timeout in seconds.
+    default: '10'
+  run_timeout:
+    description: Seconds to allow a non-detached binary to run.
+    default: '300'
+  stop_signal:
+    description: Signal used to stop a detached binary.
+    default: TERM
+  stop_timeout:
+    description: Seconds to wait after the stop signal before sending KILL.
+    default: '10'
+  allow_workload_failure:
+    description: Generate a profile even if the binary or probes fail.
+    default: 'false'
+
+  # --- profile shaping ----------------------------------------------------
+  spec_file:
+    description: Declarative spec used by the spec generator.
+    default: apparmor.spec.yaml
+  mode:
+    description: enforce | complain.
+    default: enforce
+  abi:
+    description: AppArmor ABI to pin, e.g. "3.0".
+    default: ''
+  flags:
+    description: Comma-separated profile flags.
+    default: attach_disconnected,mediate_deleted
+  abstractions:
+    description: Comma-separated abstractions to include.
+    default: base
+  exec_mode:
+    description: Transition mode for learned executables (ix, Px, Ux, Cx).
+    default: ix
+  glob_threshold:
+    description: Collapse N+ siblings sharing a permission set into <dir>/*. 0 disables.
+    default: '0'
+  generalize:
+    description: Replace per-run path components (pids, tids) with globs.
+    default: 'true'
+  exclude:
+    description: Newline-separated regexes of learned paths to drop.
+    default: ''
+  rewrite:
+    description: Newline-separated REGEX=REPLACEMENT path rewrites.
+    default: ''
+  extra_rules:
+    description: Newline-separated rules appended verbatim.
+    default: ''
+  settle_seconds:
+    description: Seconds to wait after the workload before harvesting.
+    default: '3'
+  validate:
+    description: Parse the generated profile with apparmor_parser.
+    default: 'true'
+  load_check:
+    description: Also load the profile into the kernel as a validation step.
+    default: 'false'
+
+outputs:
+  profile_path:
+    description: Path of the generated profile.
+    value: ${{ inputs.output }}
+  generator_used:
+    description: Which generator ran (runtime or spec).
+    value: ${{ steps.resolve.outputs.generator }}
+
+runs:
+  using: composite
+  steps:
+    - name: Resolve generator
+      id: resolve
+      shell: bash
+      env:
+        GENERATOR: ${{ inputs.generator }}
+        BINARY: ${{ inputs.binary }}
+        SPEC_FILE: ${{ inputs.spec_file }}
+      run: |
+        set -euo pipefail
+        case "$BINARY" in
+          /*) ;;
+          *) echo "::error::binary must be an absolute path, got '$BINARY'"; exit 1 ;;
+        esac
+        gen="$GENERATOR"
+        if [ "$gen" = "auto" ]; then
+          if [ -d /sys/kernel/security/apparmor ]; then gen=runtime; else gen=spec; fi
+        fi
+        if [ "$gen" = "spec" ] && [ ! -f "$SPEC_FILE" ]; then
+          echo "::error::generator resolved to 'spec' but $SPEC_FILE does not exist."
+          exit 1
+        fi
+        echo "generator=$gen" >> "$GITHUB_OUTPUT"
+        echo "Using the $gen generator."
+
+    - name: Install dependencies
+      shell: bash
+      env:
+        GENERATOR: ${{ steps.resolve.outputs.generator }}
+      run: |
+        set -euo pipefail
+        if [ "$GENERATOR" = "spec" ]; then
+          python3 -c "import yaml" 2>/dev/null \
+            || python3 -m pip install --quiet --disable-pip-version-check pyyaml
+        elif ! command -v apparmor_parser >/dev/null 2>&1; then
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq apparmor-utils
+        fi
+
+    - name: Install the application
+      if: ${{ steps.resolve.outputs.generator == 'runtime' && (inputs.apt_packages != '' || inputs.deb_package != '') }}
+      shell: bash
+      env:
+        APT_PACKAGES: ${{ inputs.apt_packages }}
+        DEB_PACKAGE: ${{ inputs.deb_package }}
+      run: |
+        set -euo pipefail
+        # apt-get and dpkg are baked in; inputs only become argv elements.
+        pkgs=()
+        while IFS= read -r p; do [ -n "$p" ] && pkgs+=("$p"); done <<< "$APT_PACKAGES"
+        if [ "${#pkgs[@]}" -gt 0 ]; then
+          echo "+ apt-get install ${pkgs[*]}"
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq -- "${pkgs[@]}"
+        fi
+        if [ -n "$DEB_PACKAGE" ]; then
+          [ -f "$DEB_PACKAGE" ] || { echo "::error::no such .deb: $DEB_PACKAGE"; exit 1; }
+          echo "+ dpkg -i $DEB_PACKAGE"
+          sudo dpkg -i -- "$DEB_PACKAGE" || sudo apt-get -f install -y -qq
+        fi
+
+    - name: Load the learning profile
+      id: learn
+      if: steps.resolve.outputs.generator == 'runtime'
+      shell: bash
+      env:
+        NAME: ${{ inputs.name }}
+        BINARY: ${{ inputs.binary }}
+        ACTION_PATH: ${{ github.action_path }}
+      run: |
+        set -euo pipefail
+        [ -x "$BINARY" ] || { echo "::error::$BINARY is not an executable on this runner."; exit 1; }
+        bash "$ACTION_PATH/../scripts/aa_learn_start.sh" \
+          --name "$NAME" --state "$RUNNER_TEMP/aa-learn" \
+          --template host --attach "$BINARY"
+
+    - name: Run the binary under the learning profile
+      if: steps.resolve.outputs.generator == 'runtime'
+      shell: bash
+      env:
+        BINARY: ${{ inputs.binary }}
+        BINARY_ARGS: ${{ inputs.args }}
+        BINARY_ENV: ${{ inputs.env }}
+        WORKDIR: ${{ inputs.workdir }}
+        RUN_AS: ${{ inputs.run_as }}
+        DETACH: ${{ inputs.detach }}
+        READY_URL: ${{ inputs.ready_url }}
+        READY_TIMEOUT: ${{ inputs.ready_timeout }}
+        PROBE_URLS: ${{ inputs.probe_urls }}
+        PROBE_TIMEOUT: ${{ inputs.probe_timeout }}
+        RUN_TIMEOUT: ${{ inputs.run_timeout }}
+        STOP_SIGNAL: ${{ inputs.stop_signal }}
+        STOP_TIMEOUT: ${{ inputs.stop_timeout }}
+        ALLOW_FAILURE: ${{ inputs.allow_workload_failure }}
+        ACTION_PATH: ${{ github.action_path }}
+      run: |
+        set -euo pipefail
+
+        # The launch is assembled from argv elements; no caller string is ever
+        # handed to a shell. env -i is avoided so the binary keeps PATH etc.
+        envs=()
+        while IFS= read -r v; do [ -n "$v" ] && envs+=("$v"); done <<< "$BINARY_ENV"
+        launch=(env ${envs[@]+"${envs[@]}"} "$BINARY")
+        while IFS= read -r v; do [ -n "$v" ] && launch+=("$v"); done <<< "$BINARY_ARGS"
+
+        # Never echo env values: host_env is an input, and inputs are not
+        # registered for log masking the way secrets.* are.
+        display=(env)
+        for v in ${envs[@]+"${envs[@]}"}; do display+=("${v%%=*}=***"); done
+        display+=("$BINARY")
+        while IFS= read -r v; do [ -n "$v" ] && display+=("$v"); done <<< "$BINARY_ARGS"
+
+        if [ -n "$RUN_AS" ]; then
+          launch=(sudo -u "$RUN_AS" -- "${launch[@]}")
+          display=(sudo -u "$RUN_AS" -- "${display[@]}")
+        fi
+
+        [ -n "$WORKDIR" ] && cd "$WORKDIR"
+
+        status=0
+        echo "::group::${display[*]}"
+        if [ "$DETACH" = "true" ]; then
+          "${launch[@]}" > "$RUNNER_TEMP/workload.log" 2>&1 &
+          pid=$!
+          echo "started pid $pid"
+          echo "::endgroup::"
+
+          probe=()
+          [ -n "$READY_URL" ] && probe+=(--ready "$READY_URL" --ready-timeout "$READY_TIMEOUT")
+          probe+=(--timeout "$PROBE_TIMEOUT")
+          while IFS= read -r u; do [ -n "$u" ] && probe+=("$u"); done <<< "$PROBE_URLS"
+          bash "$ACTION_PATH/../scripts/probe.sh" "${probe[@]}" || status=$?
+
+          echo "::group::Workload output"
+          tail -n 100 "$RUNNER_TEMP/workload.log" || true
+          echo "::endgroup::"
+
+          if kill -0 "$pid" 2>/dev/null; then
+            kill "-$STOP_SIGNAL" "$pid" 2>/dev/null || true
+            for _ in $(seq "$STOP_TIMEOUT"); do
+              kill -0 "$pid" 2>/dev/null || break
+              sleep 1
+            done
+            kill -KILL "$pid" 2>/dev/null || true
+          fi
+          wait "$pid" 2>/dev/null || true
+        else
+          timeout "$RUN_TIMEOUT" "${launch[@]}" || status=$?
+          echo "::endgroup::"
+        fi
+
+        echo "workload exited with status $status"
+        if [ "$status" -ne 0 ] && [ "$ALLOW_FAILURE" != "true" ]; then
+          echo "::error::The workload failed (status $status). A profile learned from a"
+          echo "partial run would be incomplete. Set allow_workload_failure to override."
+          exit "$status"
+        fi
+
+    - name: Harvest audit records
+      if: steps.resolve.outputs.generator == 'runtime'
+      shell: bash
+      env:
+        SETTLE: ${{ inputs.settle_seconds }}
+        ACTION_PATH: ${{ github.action_path }}
+      run: |
+        set -euo pipefail
+        bash "$ACTION_PATH/../scripts/aa_learn_harvest.sh" \
+          --state "$RUNNER_TEMP/aa-learn" \
+          --out "$RUNNER_TEMP/apparmor-audit.log" \
+          --settle "$SETTLE"
+
+    - name: Synthesize the profile
+      if: steps.resolve.outputs.generator == 'runtime'
+      shell: bash
+      env:
+        NAME: ${{ inputs.name }}
+        BINARY: ${{ inputs.binary }}
+        OUTPUT: ${{ inputs.output }}
+        MODE: ${{ inputs.mode }}
+        ABI: ${{ inputs.abi }}
+        FLAGS: ${{ inputs.flags }}
+        ABSTRACTIONS: ${{ inputs.abstractions }}
+        EXEC_MODE: ${{ inputs.exec_mode }}
+        GLOB_THRESHOLD: ${{ inputs.glob_threshold }}
+        GENERALIZE: ${{ inputs.generalize }}
+        EXCLUDE: ${{ inputs.exclude }}
+        REWRITE: ${{ inputs.rewrite }}
+        EXTRA_RULES: ${{ inputs.extra_rules }}
+        LEARN_PROFILE: ${{ steps.learn.outputs.learn_profile }}
+        ACTION_PATH: ${{ github.action_path }}
+      run: |
+        set -euo pipefail
+        mkdir -p "$(dirname "$OUTPUT")"
+        args=(--profile "$LEARN_PROFILE" --name "$NAME" --template host
+              --attach "$BINARY" --mode "$MODE" --flags "$FLAGS"
+              --abstractions "$ABSTRACTIONS" --exec-mode "$EXEC_MODE"
+              --glob-threshold "$GLOB_THRESHOLD" --output "$OUTPUT")
+        [ -n "$ABI" ] && args+=(--abi "$ABI")
+        [ "$GENERALIZE" = "true" ] || args+=(--no-generalize)
+        while IFS= read -r l; do [ -n "$l" ] && args+=(--exclude "$l"); done <<< "$EXCLUDE"
+        while IFS= read -r l; do [ -n "$l" ] && args+=(--rewrite "$l"); done <<< "$REWRITE"
+        while IFS= read -r l; do [ -n "$l" ] && args+=(--extra-rule "$l"); done <<< "$EXTRA_RULES"
+        python3 "$ACTION_PATH/../scripts/aa_from_logs.py" \
+          "$RUNNER_TEMP/apparmor-audit.log" "${args[@]}"
+
+    - name: Render the profile from the spec
+      if: steps.resolve.outputs.generator == 'spec'
+      shell: bash
+      env:
+        NAME: ${{ inputs.name }}
+        BINARY: ${{ inputs.binary }}
+        MODE: ${{ inputs.mode }}
+        SPEC_FILE: ${{ inputs.spec_file }}
+        OUTPUT: ${{ inputs.output }}
+        ACTION_PATH: ${{ github.action_path }}
+      run: |
+        set -euo pipefail
+        mkdir -p "$(dirname "$OUTPUT")"
+        python3 "$ACTION_PATH/../scripts/aa_from_spec.py" \
+          "$SPEC_FILE" --name "$NAME" --attach "$BINARY" \
+          --mode "$MODE" --output "$OUTPUT"
+
+    - name: Validate the profile
+      if: inputs.validate == 'true'
+      shell: bash
+      env:
+        OUTPUT: ${{ inputs.output }}
+        LOAD_CHECK: ${{ inputs.load_check }}
+        ACTION_PATH: ${{ github.action_path }}
+      run: bash "$ACTION_PATH/../scripts/validate.sh" "$OUTPUT" "$LOAD_CHECK"
+
+    - name: Summarize
+      shell: bash
+      env:
+        OUTPUT: ${{ inputs.output }}
+        GENERATOR: ${{ steps.resolve.outputs.generator }}
+      run: |
+        set -euo pipefail
+        {
+          echo "### AppArmor profile generated (host binary)"
+          echo
+          echo "- generator: \`$GENERATOR\`"
+          echo "- path: \`$OUTPUT\`"
+          echo
+          echo '```'
+          cat "$OUTPUT"
+          echo '```'
+        } >> "$GITHUB_STEP_SUMMARY"
+
+branding:
+  icon: shield
+  color: orange

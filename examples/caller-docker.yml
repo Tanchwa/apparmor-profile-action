@@ -1,0 +1,73 @@
+# Drop this in an application repo as .github/workflows/apparmor.yml
+#
+# Learns a profile by building the application image, running it under a
+# complain-mode profile, exercising it over HTTP, then opening a PR against
+# the profile committed in this repo.
+#
+# Note what is absent: there is no shell command anywhere. The docker build,
+# docker run, probing and stop are baked into the sub-action; everything here
+# is structured data that becomes argv.
+
+name: AppArmor profile
+
+on:
+  workflow_dispatch:
+  schedule:
+    # Re-learn weekly so the profile tracks dependency and base-image drift.
+    - cron: '17 4 * * 1'
+  push:
+    branches: [main]
+    paths:
+      - 'Dockerfile'
+      - 'src/**'
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  apparmor:
+    uses: linkervision/apparmor-profile-action/.github/workflows/apparmor-profile.yml@v1
+    with:
+      name: myapp
+      target: docker
+      profile_path: apparmor.d/myapp
+
+      # Build the image from this repo, then confine it.
+      docker_image: myapp:ci
+      docker_build: true
+      docker_dockerfile: Dockerfile
+      docker_build_context: .
+      docker_build_args: |
+        VERSION=ci
+        BUILDKIT_INLINE_CACHE=1
+
+      docker_ports: |
+        8080:8080
+      docker_env: |
+        LOG_LEVEL=debug
+        DATABASE_URL=sqlite:///tmp/ci.db
+
+      # Start it in the background and drive the endpoints that should be
+      # covered. Anything not requested here will be denied once enforced.
+      detach: true
+      ready_url: http://localhost:8080/healthz
+      ready_timeout: 90
+      probe_urls: |
+        http://localhost:8080/api/v1/items
+        http://localhost:8080/api/v1/status
+        http://localhost:8080/metrics
+
+      # Per-run noise that should never reach a committed profile.
+      exclude: |
+        ^/tmp/
+        ^/var/lib/docker/
+      rewrite: |
+        ^/run/containerd/.*=/run/containerd/**
+
+      reviewers: platform-security
+      merge_method: squash
+    secrets:
+      # A PAT or GitHub App token, not GITHUB_TOKEN -- see the README section
+      # on why auto-merge stalls otherwise.
+      token: ${{ secrets.APPARMOR_BOT_TOKEN }}

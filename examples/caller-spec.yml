@@ -1,0 +1,32 @@
+# Drop this in an application repo as .github/workflows/apparmor.yml
+#
+# For applications that cannot be exercised meaningfully in CI. The profile is
+# rendered from a committed apparmor.spec.yaml, with no runtime observation,
+# so this works on any runner.
+
+name: AppArmor profile
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'apparmor.spec.yaml'
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  apparmor:
+    uses: linkervision/apparmor-profile-action/.github/workflows/apparmor-profile.yml@v1
+    with:
+      name: usr.bin.myapp
+      target: host
+      generator: spec
+      spec_file: apparmor.spec.yaml
+      host_binary: /usr/bin/myapp
+      profile_path: packaging/apparmor.d/usr.bin.myapp
+      load_check: true
+    secrets:
+      token: ${{ secrets.APPARMOR_BOT_TOKEN }}

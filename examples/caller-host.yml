@@ -1,0 +1,57 @@
+# Drop this in an application repo as .github/workflows/apparmor.yml
+#
+# Learns a profile for a host binary: installs the .deb this repo builds,
+# starts the daemon under a complain-mode profile, exercises it, and opens a
+# PR with the resulting profile.
+
+name: AppArmor profile
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'src/**'
+      - 'packaging/**'
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  apparmor:
+    uses: linkervision/apparmor-profile-action/.github/workflows/apparmor-profile.yml@v1
+    with:
+      name: usr.bin.myapp
+      target: host
+      profile_path: packaging/apparmor.d/usr.bin.myapp
+
+      host_binary: /usr/bin/myapp
+      # Installed with dpkg before learning. Build it in a prior job and pass
+      # it through an artifact, or point at a path this repo already carries.
+      host_deb_package: dist/myapp_1.2.3_amd64.deb
+      host_apt_packages: |
+        libssl3
+        ca-certificates
+
+      host_args: |
+        --config
+        /etc/myapp/config.yaml
+        --listen
+        127.0.0.1:9090
+      host_env: |
+        MYAPP_ENV=ci
+      host_run_as: myapp
+
+      detach: true
+      ready_url: http://127.0.0.1:9090/healthz
+      probe_urls: |
+        http://127.0.0.1:9090/api/v1/status
+
+      # Prove the kernel accepts the profile, not just that it parses.
+      load_check: true
+
+      labels: apparmor,security,packaging
+      team_reviewers: platform-security
+    secrets:
+      token: ${{ secrets.APPARMOR_BOT_TOKEN }}

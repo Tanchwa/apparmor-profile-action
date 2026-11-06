@@ -1,0 +1,5 @@
+__pycache__/
+*.pyc
+# Scratch output from running the generators locally.
+audit.log
+*.profile.local

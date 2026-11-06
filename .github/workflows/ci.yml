@@ -1,0 +1,116 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  unit:
+    name: Generators and wiring
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          python3 -c "import yaml" 2>/dev/null || python3 -m pip install --quiet pyyaml
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq apparmor-utils
+
+      - name: Lint shell scripts
+        run: shellcheck scripts/*.sh tests/*.sh
+
+      - name: Lint workflows
+        uses: docker://rhysd/actionlint:1.7.12
+        with:
+          args: -color
+
+      - name: Check action and example syntax
+        run: |
+          python3 - <<'PY'
+          import glob, yaml
+          for path in (glob.glob("_*/action.yml")
+                       + glob.glob(".github/workflows/*.yml")
+                       + glob.glob("examples/*.yml")):
+              yaml.safe_load(open(path))
+              print("ok", path)
+          PY
+
+      - name: Run the test suite
+        run: tests/run.sh
+
+  integration-docker:
+    name: End-to-end learning (docker)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Confirm the runner has AppArmor
+        run: |
+          test -d /sys/kernel/security/apparmor
+          sudo apparmor_status --enabled && echo "AppArmor is enabled"
+
+      - name: Learn a profile from a real container run
+        uses: ./_docker
+        with:
+          name: ci-busybox
+          output: ${{ runner.temp }}/ci-busybox.profile
+          generator: runtime
+          image: busybox:latest
+          entrypoint: /bin/cat
+          args: |
+            /etc/hostname
+          load_check: true
+
+      - name: The profile must describe what the workload actually did
+        run: |
+          set -euo pipefail
+          profile="${{ runner.temp }}/ci-busybox.profile"
+          cat "$profile"
+          grep -q 'profile ci-busybox' "$profile"
+          grep -q '/etc/hostname' "$profile" \
+            || { echo "::error::learned profile is missing /etc/hostname"; exit 1; }
+
+  integration-host:
+    name: End-to-end learning (host binary)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Learn a profile for a host binary
+        uses: ./_host
+        with:
+          name: ci-id
+          output: ${{ runner.temp }}/ci-id.profile
+          generator: runtime
+          binary: /usr/bin/id
+          load_check: true
+
+      - name: The profile must attach to the binary it confines
+        run: |
+          set -euo pipefail
+          profile="${{ runner.temp }}/ci-id.profile"
+          cat "$profile"
+          grep -q 'profile ci-id /usr/bin/id' "$profile" \
+            || { echo "::error::profile does not attach to /usr/bin/id"; exit 1; }
+
+  spec-roundtrip:
+    name: Spec renders and parses
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Render the example spec and load it
+        uses: ./_host
+        with:
+          name: myapp
+          output: ${{ runner.temp }}/myapp.profile
+          generator: spec
+          binary: /usr/bin/myapp
+          spec_file: examples/apparmor.spec.yaml
+          load_check: true

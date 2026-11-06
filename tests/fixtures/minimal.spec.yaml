@@ -1,0 +1,10 @@
+name: minimal
+mode: complain
+abstractions: [base]
+capabilities: [chown]
+network: [inet stream]
+files:
+  read: [/etc/minimal.conf]
+  write: [/var/lib/minimal/**]
+deny:
+  write: [/etc/**]
