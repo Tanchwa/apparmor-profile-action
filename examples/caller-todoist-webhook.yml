@@ -1,0 +1,81 @@
+# A real worked example: a Flask webhook receiver whose only business route is
+# an HMAC-authenticated POST.
+#
+# Drop this in Todoist-Reclaim-Webhook as .github/workflows/apparmor.yml.
+#
+# This is the shape that motivated `probe_headers`, `probe_body` and
+# `ready_expect_status`: before them, a service with no GET route returning 2xx
+# could not be exercised at all, and the profile would have covered process
+# startup and nothing else.
+
+name: AppArmor profile
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'flaskr/**'
+      - 'Dockerfile'
+      - 'requirements.txt'
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  apparmor:
+    uses: Tanchwa/apparmor-profile-action/.github/workflows/apparmor-profile.yml@v1
+    with:
+      name: todoist-reclaim-webhook
+      target: docker
+      profile_path: apparmor.d/todoist-reclaim-webhook
+
+      docker_image: todoist-reclaim-webhook:aa-learn
+      docker_build: true
+      docker_ports: |
+        5000:5000
+
+      # api.py calls .encode() on TODOIST_KEY at import, so the process will
+      # not start without it. These are throwaway values: the signature below
+      # is computed against this key, and nothing here can reach real Todoist
+      # or Reclaim accounts. Never put the production keys here -- workflow
+      # inputs are not registered for log masking.
+      docker_env: |
+        TODOIST_KEY=aa-learn-dummy-key
+        RECLAIM_KEY=aa-learn-dummy
+
+      detach: true
+      ready_url: http://localhost:5000/health
+      ready_expect_status: '200'
+      ready_timeout: 60
+
+      # IMPORTANT: probe_body must be a single-line scalar, not a `|` block.
+      # A block scalar appends a trailing newline, which changes the bytes the
+      # HMAC is computed over, and the probe would then get 401 instead of 200.
+      probe_body: '{"event_name":"item:added","event_data":{"content":"aa-learn probe","url":"https://todoist.com/showTask?id=0","priority":1,"added_at":"2026-01-01T00:00:00.000000Z","due":null,"duration":null}}'
+
+      # base64(hmac_sha256(TODOIST_KEY, probe_body)). Fixed key plus fixed body
+      # gives a fixed signature, so no secret and no shell are needed. Recompute
+      # with:
+      #   python3 -c 'import hmac,hashlib,base64,sys;print(base64.b64encode(
+      #     hmac.new(b"aa-learn-dummy-key", sys.stdin.buffer.read(),
+      #     hashlib.sha256).digest()).decode())'
+      # piping the exact body bytes with no trailing newline.
+      probe_headers: |
+        X-Todoist-Hmac-SHA256: 23GIbkMWFyJtm15NxlBAa+iKUruLiBppFX37mAhJwjk=
+        Content-Type: application/json
+
+      probe_urls: |
+        http://localhost:5000/health
+        GET 405 http://localhost:5000/webhook
+        POST http://localhost:5000/webhook
+
+      # The POST reaches the Reclaim SDK, which opens a TLS connection before
+      # failing auth. Dwell so the DNS, certificate and socket activity that
+      # follows is captured rather than cut off by an immediate stop.
+      dwell_seconds: 5
+
+      labels: apparmor,security
+    secrets:
+      token: ${{ secrets.APPARMOR_BOT_TOKEN }}

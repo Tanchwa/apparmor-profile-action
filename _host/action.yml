@@ -3,7 +3,7 @@ description: >-
   Generate an AppArmor profile for a binary installed on the runner. The
   install, launch, probe and stop commands are baked into this action;
   callers supply only structured values, never shell.
-author: linkervision
+author: Tanchwa
 
 inputs:
   # --- identity ---------------------------------------------------------
@@ -60,6 +60,30 @@ inputs:
   probe_timeout:
     description: Per-request timeout in seconds.
     default: '10'
+  ready_expect_status:
+    description: >-
+      Status that counts as ready: "any" (the server answered at all), a class
+      such as 2xx, or an exact code. Default "any", because readiness asks
+      whether the process is listening -- a service whose only route is an
+      authenticated POST answers 405 to a GET and is nonetheless up.
+    default: any
+  probe_headers:
+    description: >-
+      Newline-separated "Name: value" headers sent with every probe. Never
+      echoed to the log. A fixed body signed with a fixed test key yields a
+      fixed signature, so an HMAC-authenticated endpoint can be probed by
+      pasting that signature here.
+    default: ''
+  probe_body:
+    description: >-
+      Request body sent with every non-GET probe. Never echoed to the log.
+    default: ''
+  dwell_seconds:
+    description: >-
+      Seconds to let the workload keep running after probing, before it is
+      stopped. With no probes at all this is how a startup-only profile is
+      learned: start it, let it settle, stop it.
+    default: '0'
   run_timeout:
     description: Seconds to allow a non-detached binary to run.
     default: '300'
@@ -217,6 +241,10 @@ runs:
         READY_TIMEOUT: ${{ inputs.ready_timeout }}
         PROBE_URLS: ${{ inputs.probe_urls }}
         PROBE_TIMEOUT: ${{ inputs.probe_timeout }}
+        READY_EXPECT: ${{ inputs.ready_expect_status }}
+        PROBE_HEADERS: ${{ inputs.probe_headers }}
+        PROBE_BODY: ${{ inputs.probe_body }}
+        DWELL: ${{ inputs.dwell_seconds }}
         RUN_TIMEOUT: ${{ inputs.run_timeout }}
         STOP_SIGNAL: ${{ inputs.stop_signal }}
         STOP_TIMEOUT: ${{ inputs.stop_timeout }}
@@ -255,10 +283,28 @@ runs:
           echo "::endgroup::"
 
           probe=()
-          [ -n "$READY_URL" ] && probe+=(--ready "$READY_URL" --ready-timeout "$READY_TIMEOUT")
+          if [ -n "$READY_URL" ]; then
+            probe+=(--ready "$READY_URL" --ready-timeout "$READY_TIMEOUT"
+                    --ready-expect "$READY_EXPECT")
+          fi
           probe+=(--timeout "$PROBE_TIMEOUT")
+          while IFS= read -r h; do
+            [ -n "$h" ] && probe+=(--header "$h")
+          done <<< "$PROBE_HEADERS"
+          if [ -n "$PROBE_BODY" ]; then
+            # A file, not an argv element: a body on the command line would be
+            # visible in the process table to anything else on the runner.
+            printf '%s' "$PROBE_BODY" > "$RUNNER_TEMP/probe-body"
+            probe+=(--body-file "$RUNNER_TEMP/probe-body")
+          fi
+          # Each spec stays one argv element; probe.sh splits "METHOD STATUS URL".
           while IFS= read -r u; do [ -n "$u" ] && probe+=("$u"); done <<< "$PROBE_URLS"
           bash "$ACTION_PATH/../scripts/probe.sh" "${probe[@]}" || status=$?
+
+          if [ "$DWELL" -gt 0 ]; then
+            echo "dwelling ${DWELL}s to observe steady-state activity"
+            sleep "$DWELL"
+          fi
 
           echo "::group::Workload output"
           tail -n 100 "$RUNNER_TEMP/workload.log" || true

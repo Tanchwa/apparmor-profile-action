@@ -149,13 +149,42 @@ on:
         type: number
         default: 60
       probe_urls:
-        description: Newline-separated http(s) URLs to request while the workload runs.
+        description: >-
+          Newline-separated probes run while the workload runs. Each line is
+          "URL" (GET, expect 2xx), "METHOD URL", or "METHOD STATUS URL" where
+          STATUS is any / a class like 4xx / an exact code. An endpoint that is
+          meant to reject the request still runs its handler, so
+          "POST 401 http://localhost:5000/webhook" is a legitimate probe.
         type: string
         default: ''
       probe_timeout:
         description: Per-request timeout in seconds.
         type: number
         default: 10
+      ready_expect_status:
+        description: >-
+          Status that counts as ready: "any" (the server answered at all), a
+          class such as 2xx, or an exact code. Default "any", because readiness
+          asks whether the process is listening -- a service whose only route is
+          an authenticated POST answers 405 to a GET and is nonetheless up.
+        type: string
+        default: any
+      probe_headers:
+        description: >-
+          Newline-separated "Name: value" headers sent with every probe. Never
+          echoed to the log.
+        type: string
+        default: ''
+      probe_body:
+        description: Request body sent with every non-GET probe. Never echoed to the log.
+        type: string
+        default: ''
+      dwell_seconds:
+        description: >-
+          Seconds to let the workload keep running after probing. With no probes
+          at all this is how a startup-only profile is learned.
+        type: number
+        default: 0
       run_timeout:
         description: Seconds to allow a non-detached workload to run.
         type: number
@@ -300,7 +329,7 @@ on:
       action_repo:
         description: Repository holding this workflow and its sub-actions.
         type: string
-        default: linkervision/apparmor-profile-action
+        default: Tanchwa/apparmor-profile-action
       action_ref:
         description: >-
           Ref of action_repo holding the sub-actions and scripts. PIN THIS TO
@@ -512,6 +541,10 @@ jobs:
           ready_timeout: ${{ inputs.ready_timeout }}
           probe_urls: ${{ inputs.probe_urls }}
           probe_timeout: ${{ inputs.probe_timeout }}
+          ready_expect_status: ${{ inputs.ready_expect_status }}
+          probe_headers: ${{ inputs.probe_headers }}
+          probe_body: ${{ inputs.probe_body }}
+          dwell_seconds: ${{ inputs.dwell_seconds }}
           run_timeout: ${{ inputs.run_timeout }}
           allow_workload_failure: ${{ inputs.allow_workload_failure }}
           spec_file: ${{ inputs.spec_file }}
@@ -550,6 +583,10 @@ jobs:
           ready_timeout: ${{ inputs.ready_timeout }}
           probe_urls: ${{ inputs.probe_urls }}
           probe_timeout: ${{ inputs.probe_timeout }}
+          ready_expect_status: ${{ inputs.ready_expect_status }}
+          probe_headers: ${{ inputs.probe_headers }}
+          probe_body: ${{ inputs.probe_body }}
+          dwell_seconds: ${{ inputs.dwell_seconds }}
           run_timeout: ${{ inputs.run_timeout }}
           allow_workload_failure: ${{ inputs.allow_workload_failure }}
           spec_file: ${{ inputs.spec_file }}

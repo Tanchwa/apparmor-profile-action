@@ -41,7 +41,7 @@ permissions:
 
 jobs:
   apparmor:
-    uses: linkervision/apparmor-profile-action/.github/workflows/apparmor-profile.yml@v1
+    uses: Tanchwa/apparmor-profile-action/.github/workflows/apparmor-profile.yml@v1
     with:
       name: myapp
       target: docker
@@ -120,6 +120,30 @@ The accurate option, and the one to prefer. The sub-action:
 4. Harvests the kernel audit records, then synthesizes an enforce-mode profile
    covering the files, capabilities, network families, signals, ptrace, mounts
    and exec transitions actually used.
+
+#### Services with no health endpoint
+
+Readiness defaults to `ready_expect_status: any`, which asks only whether the
+process answered — a service whose sole route is an authenticated `POST`
+replies `405` to a `GET` and is nonetheless up. Probes then assert real
+statuses, so a handler that is *meant* to reject the request still runs:
+
+```yaml
+ready_url: http://localhost:5000/webhook   # 405 means "listening"
+probe_urls: |
+  GET 405 http://localhost:5000/webhook
+  POST 401 http://localhost:5000/webhook   # handler runs, then rejects
+```
+
+For an HMAC-signed endpoint, a fixed test key and a fixed body produce a fixed
+signature, so it can be pasted into `probe_headers` with no secret and no
+shell — see
+[`examples/caller-todoist-webhook.yml`](examples/caller-todoist-webhook.yml).
+Note that `probe_body` must be a single-line scalar: a `|` block appends a
+newline and changes the bytes the signature covers.
+
+When there is genuinely nothing to probe, `dwell_seconds` alone yields a
+startup-only profile: start the workload, let it settle, stop it.
 
 The catch is inherent to the method, not to this implementation: **a learned
 profile only covers the code paths CI exercised.** An endpoint absent from
@@ -297,10 +321,14 @@ workflows.** This is a deliberate GitHub loop-guard, and it means the PR's
 required status checks never start, so auto-merge waits forever on checks that
 will never run.
 
-Pass a personal access token or GitHub App installation token as the `token`
-secret to avoid this. The token needs `contents: write` and
-`pull-requests: write` on the application repo. A GitHub App is the better
-choice: its tokens are short-lived and are not tied to a person.
+Pass a personal access token or a GitHub App installation token as the `token`
+secret to avoid this. It needs `contents: write` and `pull-requests: write` on
+the application repo.
+
+**This only bites if the base branch requires status checks.** If the only
+requirement is an approving review, the default `GITHUB_TOKEN` is fine:
+nothing is waiting on a check that will never start, so GitHub merges as soon
+as a human approves.
 
 ## Inputs
 
@@ -350,9 +378,13 @@ choice: its tokens are short-lived and are not tied to a person.
 |---|---|---|
 | `detach` | `false` | Run in the background and exercise over HTTP. |
 | `ready_url` | `''` | Poll this `http(s)` URL until it answers. |
+| `ready_expect_status` | `any` | What counts as ready: `any`, a class like `2xx`, or an exact code. |
 | `ready_timeout` | `60` | Seconds to wait for readiness. |
-| `probe_urls` | `''` | Newline-separated `http(s)` URLs to request. |
+| `probe_urls` | `''` | Newline-separated probes. Each line is `URL`, `METHOD URL`, or `METHOD STATUS URL`. |
+| `probe_headers` | `''` | Newline-separated `Name: value`, sent with every probe. Never logged. |
+| `probe_body` | `''` | Body sent with every non-GET probe. Never logged. |
 | `probe_timeout` | `10` | Per-request timeout. |
+| `dwell_seconds` | `0` | Keep the workload running this long after probing. |
 | `run_timeout` | `300` | Seconds allowed for a non-detached workload. |
 | `allow_workload_failure` | `false` | Generate even if the workload or probes fail. |
 
@@ -399,7 +431,7 @@ choice: its tokens are short-lived and are not tied to a person.
 | `dry_run` | `false` | Generate and validate only; never push or open a PR. |
 | `fail_on_drift` | `false` | Fail when the committed profile differs. Pair with `dry_run`. |
 | `runs_on` | `ubuntu-latest` | Runner label. Runtime learning needs AppArmor. |
-| `action_repo` | `linkervision/apparmor-profile-action` | Where the sub-actions are fetched from. |
+| `action_repo` | `Tanchwa/apparmor-profile-action` | Where the sub-actions are fetched from. |
 | `action_ref` | `main` | Ref the sub-actions and scripts are fetched from. **Pin to the same tag you call the workflow with** — calling `@v1` while this says `main` runs v1's workflow against main's generator. Overridden automatically by `GITHUB_JOB_WORKFLOW_SHA` where the runner provides it. |
 | `timeout_minutes` | `30` | Job timeout. |
 
@@ -418,7 +450,7 @@ The sub-actions generate and validate without any of the PR machinery. Use one
 when you want the profile inside a job you already control:
 
 ```yaml
-- uses: linkervision/apparmor-profile-action/_docker@v1
+- uses: Tanchwa/apparmor-profile-action/_docker@v1
   with:
     name: myapp
     output: apparmor.d/myapp
@@ -427,7 +459,7 @@ when you want the profile inside a job you already control:
     detach: true
     ready_url: http://localhost:8080/healthz
 
-- uses: linkervision/apparmor-profile-action/_host@v1
+- uses: Tanchwa/apparmor-profile-action/_host@v1
   with:
     name: usr.bin.myapp
     output: packaging/apparmor.d/usr.bin.myapp
@@ -496,9 +528,11 @@ learned profile is a transcript of one CI run, not a security decision:
   zero audit records matched the profile — do not weaken either check.
 - **`sudo` is required** on the runner to load the learning profile and read
   kernel messages.
-- **Probing is HTTP only.** A workload exercised over gRPC, AMQP or a CLI
-  needs `detach: false` with `docker_args`/`host_args` driving it, or a
-  self-test subcommand in the image.
+- **Probing is HTTP only, with one header set and one body for all probes.**
+  A workload exercised over gRPC, AMQP or a CLI needs `detach: false` with
+  `docker_args`/`host_args` driving it, or a self-test subcommand in the
+  image. Probes needing *different* bodies per request are not expressible;
+  run the workflow twice, or drive them from the image.
 - **Audit records can be lost** if the kernel ring buffer wraps during a very
   chatty run. Keep the exercised workload tight, or install `auditd` on a
   self-hosted runner.

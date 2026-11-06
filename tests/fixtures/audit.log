@@ -1,0 +1,14 @@
+[  120.123456] audit: type=1400 audit(1699999999.100:11): apparmor="ALLOWED" operation="open" profile="aa-learn-myapp" name="/etc/myapp/config.yaml" pid=4211 comm="myapp" requested_mask="r" denied_mask="r" fsuid=0 ouid=0
+[  120.123460] audit: type=1400 audit(1699999999.101:12): apparmor="ALLOWED" operation="open" profile="aa-learn-myapp" name="/var/log/myapp/app.log" pid=4211 comm="myapp" requested_mask="wc" denied_mask="wc" fsuid=0 ouid=0
+[  120.123470] audit: type=1400 audit(1699999999.102:13): apparmor="ALLOWED" operation="open" profile="aa-learn-myapp" name="/proc/4211/status" pid=4211 comm="myapp" requested_mask="r" denied_mask="r"
+[  120.123471] audit: type=1400 audit(1699999999.102:14): apparmor="ALLOWED" operation="open" profile="aa-learn-myapp" name="/proc/4299/status" pid=4211 comm="myapp" requested_mask="r" denied_mask="r"
+[  120.123480] audit: type=1400 audit(1699999999.103:15): apparmor="ALLOWED" operation="capable" profile="aa-learn-myapp" pid=4211 comm="myapp" capability=10 capname="net_bind_service"
+[  120.123481] audit: type=1400 audit(1699999999.103:16): apparmor="ALLOWED" operation="capable" profile="aa-learn-myapp" pid=4211 comm="myapp" capability=0 capname="chown"
+[  120.123490] audit: type=1400 audit(1699999999.104:17): apparmor="ALLOWED" operation="create" profile="aa-learn-myapp" pid=4211 comm="myapp" family="inet" sock_type="stream" protocol=6 requested_mask="create" denied_mask="create"
+[  120.123491] audit: type=1400 audit(1699999999.104:18): apparmor="ALLOWED" operation="create" profile="aa-learn-myapp" pid=4211 comm="myapp" family="unix" sock_type="stream" protocol=0 requested_mask="create" denied_mask="create"
+[  120.123500] audit: type=1400 audit(1699999999.105:19): apparmor="ALLOWED" operation="exec" profile="aa-learn-myapp" name="/usr/bin/helper" pid=4299 comm="myapp" requested_mask="x" denied_mask="x"
+[  120.123510] audit: type=1400 audit(1699999999.106:20): apparmor="ALLOWED" operation="signal" profile="aa-learn-myapp" pid=4211 comm="myapp" requested_mask="send" denied_mask="send" signal="term" peer="unconfined"
+[  120.123520] audit: type=1400 audit(1699999999.107:21): apparmor="ALLOWED" operation="ptrace" profile="aa-learn-myapp//child" pid=4211 comm="myapp" requested_mask="read" denied_mask="read" peer="unconfined"
+[  120.123530] audit: type=1400 audit(1699999999.108:22): apparmor="ALLOWED" operation="file_mmap" profile="aa-learn-myapp" name="/usr/lib/x86_64-linux-gnu/libfoo.so.1" pid=4211 comm="myapp" requested_mask="rm" denied_mask="rm"
+[  120.123540] audit: type=1400 audit(1699999999.109:23): apparmor="ALLOWED" operation="open" profile="some-other-profile" name="/etc/secret" pid=999 comm="other" requested_mask="r" denied_mask="r"
+[  120.123550] kernel: some unrelated dmesg line without apparmor

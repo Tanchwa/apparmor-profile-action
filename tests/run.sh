@@ -93,6 +93,11 @@ else
   echo "ok       no input is executed as shell"
 fi
 
+# --- probe semantics --------------------------------------------------------
+if ! PYTHON="$PYTHON" bash tests/check_probe.sh; then
+  failures=$((failures + 1))
+fi
+
 # --- secrets must not reach the build log -----------------------------------
 if ! PYTHON="$PYTHON" bash tests/check_no_secret_echo.sh; then
   failures=$((failures + 1))

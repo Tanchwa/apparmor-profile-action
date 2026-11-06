@@ -27,7 +27,7 @@ permissions:
 
 jobs:
   apparmor:
-    uses: linkervision/apparmor-profile-action/.github/workflows/apparmor-profile.yml@v1
+    uses: Tanchwa/apparmor-profile-action/.github/workflows/apparmor-profile.yml@v1
     with:
       name: myapp
       target: docker

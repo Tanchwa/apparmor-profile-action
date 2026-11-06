@@ -1,5 +1,8 @@
 __pycache__/
 *.pyc
-# Scratch output from running the generators locally.
+# Scratch output from running the generators locally. The negation keeps the
+# test fixture of the same name tracked -- without it the suite cannot run
+# from a fresh clone.
 audit.log
+!tests/fixtures/audit.log
 *.profile.local
